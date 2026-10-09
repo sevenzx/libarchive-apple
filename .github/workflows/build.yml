@@ -1,0 +1,122 @@
+name: Build libarchive Apple
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      libarchive_version:
+        description: "libarchive stable version; blank uses sources.lock.json"
+        type: string
+        required: false
+      xz_version:
+        description: "XZ stable version; blank keeps the locked version"
+        type: string
+        required: false
+      revision:
+        description: "Artifact revision; increase when rebuilding the same source versions"
+        type: string
+        default: "1"
+        required: true
+      publish:
+        description: "Publish a new immutable Release after verification"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}-${{ inputs.libarchive_version }}-${{ inputs.xz_version }}-${{ inputs.revision }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    outputs:
+      tag: ${{ steps.package.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate source lock tooling
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Resolve selected stable releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIBARCHIVE_INPUT: ${{ inputs.libarchive_version }}
+          XZ_INPUT: ${{ inputs.xz_version }}
+        run: |
+          python3 scripts/source_lock.py \
+            --libarchive-version "$LIBARCHIVE_INPUT" --xz-version "$XZ_INPUT" \
+            --output dist/candidate.lock.json
+      - name: Build static Apple slices and UTF-8 shim
+        env:
+          LIBARCHIVE_APPLE_SOURCE_LOCK: ${{ github.workspace }}/dist/candidate.lock.json
+          LIBARCHIVE_APPLE_BUILD_JOBS: "3"
+        run: sh scripts/build.sh
+      - name: Verify Unicode, ZIP CRC, RAR4, RAR5, 7z and SDK linkage
+        run: sh scripts/verify.sh
+      - name: Package verified artifact
+        id: package
+        env:
+          ARTIFACT_REVISION: ${{ inputs.revision || '1' }}
+        run: |
+          tag=$(python3 scripts/package.py --lock dist/candidate.lock.json --revision "$ARTIFACT_REVISION")
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: libarchive-apple-${{ github.run_id }}
+          path: |
+            dist/LibraArchive.xcframework.zip
+            dist/artifact.json
+            dist/sources.lock.json
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - name: Download this run's verified artifact
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "libarchive-apple-$GITHUB_RUN_ID" --dir release
+      - name: Verify provenance and archive checksum
+        run: |
+          cd release
+          sha256sum --check SHA256SUMS
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          metadata = json.loads(Path("artifact.json").read_text())
+          assert metadata["releaseTag"] == os.environ["RELEASE_TAG"]
+          assert metadata["recipe"]["commit"] == os.environ["GITHUB_SHA"]
+          assert metadata["recipe"]["dirty"] is False
+          Path("release-notes.md").write_text(
+              "Static XCFramework for iOS 17 device/simulator and macOS 14 package tests.\n\n"
+              "- libarchive: " + metadata["sources"]["libarchive"]["version"] + "\n"
+              "- liblzma: " + metadata["sources"]["xz"]["version"] + "\n"
+              "- UTF-8 shim ABI: " + str(metadata["shimABI"]) + "\n"
+              "- Recipe commit: " + metadata["recipe"]["commit"] + "\n\n"
+              "Includes upstream notices and source locks. Build verification covers "
+              "C-locale Unicode, unavailable-locale operation, ZIP CRC, RAR4/RAR5/7z "
+              "decoding and unsigned iOS device/simulator linkage. "
+              "Application regression and real-device behavior require consumer validation.\n"
+          )
+          PY
+      - name: Publish a fresh versioned Release
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists. Use a new artifact revision; existing assets are never replaced." >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "$RELEASE_TAG" \
+            --notes-file release/release-notes.md \
+            release/LibraArchive.xcframework.zip release/artifact.json \
+            release/sources.lock.json release/SHA256SUMS
+

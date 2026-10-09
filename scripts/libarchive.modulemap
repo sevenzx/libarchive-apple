@@ -1,0 +1,10 @@
+module libarchive [system] {
+    header "archive.h"
+    header "archive_entry.h"
+    header "archive_apple.h"
+    link "z"
+    link "bz2"
+    link "iconv"
+    export *
+}
+

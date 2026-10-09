@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "libarchive": {
+    "version": "3.8.9",
+    "url": "https://github.com/libarchive/libarchive/releases/download/v3.8.9/libarchive-3.8.9.tar.gz",
+    "sha256": "f5a6539059cf5e597dbeda37bfa4874b1e8dea063c8d93bf85a2b44af90a5bd4"
+  },
+  "xz": {
+    "version": "5.8.4",
+    "url": "https://github.com/tukaani-project/xz/releases/download/v5.8.4/xz-5.8.4.tar.gz",
+    "sha256": "0014c7886930454fe8bd4228665b51af55eeae560ea135c9c4cd33f55b2591d9"
+  }
+}
+
